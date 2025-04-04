@@ -1,6 +1,6 @@
 use bluer::Address;
-use std::io::Read;
 use tokio::sync::{broadcast, mpsc};
+use tokio::signal::unix::{signal, SignalKind};
 
 mod command;
 mod connection;
@@ -18,7 +18,7 @@ use fs::TempUnixSeqpacketListener;
 // Events
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /*
     // Change device ID.
     // Need to use btmgmt because there is no equivalent HCI command.
@@ -38,28 +38,9 @@ async fn main() {
     // TODO: rather than read fron stdin, receive signals in order to stop
     // (Or however systemd does it)
 
-    // Spawn a task to read from stdin.
-    let (user_input_tx, mut user_input_rx) = mpsc::channel::<()>(16);
-    let user_input_handle = tokio::spawn(async move {
-        let _tx = user_input_tx; // move
-        let mut stdin = std::io::stdin();
-        // Rather than quit externally, we should put REPL code in this thread and send the
-        // termination signal out.
-        loop {
-            let mut b = [0u8];
-            match stdin.read(&mut b) {
-                Ok(_) => {
-                    // Terminate the program.
-                    break;
-                },
-                Err(_) => {
-                    // Also terminate the program.
-                    break;
-                },
-            }
-        }
-        println!("main: exited user input loop");
-    });
+    // Listen for SIGINT (Ctrl-C) and SIGTERM.
+    let mut int_signal = signal(SignalKind::interrupt())?;
+    let mut term_signal = signal(SignalKind::terminate())?;
 
     let event_listener = TempUnixSeqpacketListener::bind("event").unwrap();
     let (server_event_tx, mut server_event_rx) = broadcast::channel(16);
@@ -72,6 +53,8 @@ async fn main() {
     let command_listener = TempUnixSeqpacketListener::bind("command").unwrap();
     let (command_tx, mut command_rx) = mpsc::channel(16);
     let command_server = CommandServer::listen(command_listener, command_tx);
+
+    eprintln!("Server started. Press Ctrl-C to quit.");
 
     loop {
         tokio::select! {
@@ -107,7 +90,12 @@ async fn main() {
                 };
                 println!("Server event: {:?}", server_event);
             },
-            _ = user_input_rx.recv() => {
+            _ = int_signal.recv() => {
+                eprintln!("main: interrupted");
+                break;
+            },
+            _ = term_signal.recv() => {
+                eprintln!("main: terminated");
                 break;
             },
         }
@@ -124,8 +112,7 @@ async fn main() {
     drop(event_server);
     eprintln!("main: event server down");
 
-    user_input_handle.abort();
-    eprintln!("main: input handle aborted");
+    Ok(())
 }
 
 

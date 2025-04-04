@@ -10,5 +10,5 @@ hid-device-class = { git = "https://github.com/eyanje/hid-device-class", version
 hid-device-configuration = { git = "https://github.com/eyanje/hid-device-configuration", version = "0.1.0" }
 hid-device-id = { git = "https://github.com/eyanje/hid-device-id", version = "0.1.0" }
 libc = "0.2.167"
-tokio = { version = "1.41.1", features = ["net", "rt", "rt-multi-thread", "sync"] }
+tokio = { version = "1.41.1", features = ["net", "rt", "rt-multi-thread", "signal", "sync"] }
 uds = { version = "0.4.2", features = ["tokio"] }
