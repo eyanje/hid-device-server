@@ -230,17 +230,19 @@ impl Display for HandleConnectionError {
 
 /// Establish sockets and I/O loops for the control and interrupt sockets, as well as an event
 /// socket.
-fn handle_connection<RegistrantId>(
+fn handle_connection<RegistrantId, P: AsRef<Path>>(
     peer_address: Address,
     current_registration_info: &RegistrationInfo<RegistrantId>,
+    runtime_directory: P,
     control_socket: SeqPacket,
     interrupt_rx: mpsc::Receiver<SeqPacket>,
     server_event_tx: broadcast::Sender<ServerEvent>,
 ) -> std::result::Result<CancelHandle<()>, HandleConnectionError> {
     // R/W for the group
     // Create directory for sockets
-    let connection_dir_path = PathBuf::from(
+    let connection_dir_name = PathBuf::from(
         peer_address.to_string().replace(":", "_"));
+    let connection_dir_path = runtime_directory.as_ref().join(connection_dir_name);
     let connection_dir = match TempDir::new(&connection_dir_path) {
         Ok(dir) => dir,
         Err(e) => {
@@ -400,9 +402,10 @@ async fn cancel_existing(connections_mutex: &Mutex<Vec<Connection>>, peer_addres
 }
 
 
-async fn receive_control_connection<RegistrantId: Sync>(
+async fn receive_control_connection<RegistrantId: Sync, P: AsRef<Path>>(
     current_registration_info: &RegistrationInfo<RegistrantId>,
     connections_mutex: Arc<Mutex<Vec<Connection>>>,
+    runtime_directory: P,
     control: SeqPacket,
     peer_address: Address,
     server_event_tx: broadcast::Sender<ServerEvent>,
@@ -419,6 +422,7 @@ async fn receive_control_connection<RegistrantId: Sync>(
     let connection_handle = match handle_connection(
         peer_address,
         current_registration_info,
+        runtime_directory,
         control,
         interrupt_rx,
         server_event_tx.clone(),
@@ -547,11 +551,13 @@ impl ListeningServer {
     pub fn accept<RegistrantId: Clone + Send + Sync + 'static>(
         self,
         current_registration: Registration<RegistrantId>,
+        runtime_directory: PathBuf,
         connections: Arc<Mutex<Vec<Connection>>>,
         server_event_tx: broadcast::Sender<ServerEvent>,
     ) -> AcceptingServer<RegistrantId> {
         AcceptingServer::accept(
             current_registration,
+            runtime_directory,
             self.control_listener,
             self.interrupt_listener,
             connections,
@@ -575,6 +581,7 @@ impl<RegistrantId: Clone + Send + Sync + 'static> AcceptingServer<RegistrantId> 
     /// Begin accepting connections.
     pub fn accept(
         current_registration: Registration<RegistrantId>,
+        runtime_directory: PathBuf,
         control_listener: SeqPacketListener,
         interrupt_listener: SeqPacketListener,
         connections_mutex: Arc<Mutex<Vec<Connection>>>,
@@ -600,6 +607,7 @@ impl<RegistrantId: Clone + Send + Sync + 'static> AcceptingServer<RegistrantId> 
                         receive_control_connection(
                             &current_registration_info_moved,
                             connections_mutex.clone(),
+                            &runtime_directory,
                             control,
                             peer_addr.addr,
                             server_event_tx.clone()).await;
@@ -667,15 +675,19 @@ impl<RegistrantId: Clone + Send + Sync> Drop for AcceptingServer<RegistrantId> {
 /// Persistent server of connections
 pub struct Server<RegistrantId: Clone + Send + Sync> {
     address: Address,
+    runtime_directory: PathBuf,
     connections_mutex: Arc<Mutex<Vec<Connection>>>,
     accepting_server: Option<AcceptingServer<RegistrantId>>,
     server_event_tx: broadcast::Sender<ServerEvent>,
 }
 
 impl<RegistrantId: Clone + Send + Sync + 'static> Server<RegistrantId> {
-    pub fn new(address: Address, server_event_tx: broadcast::Sender<ServerEvent>) -> Self {
+    pub fn new(address: Address,
+               runtime_directory: PathBuf,
+               server_event_tx: broadcast::Sender<ServerEvent>) -> Self {
         Self {
             address,
+            runtime_directory,
             connections_mutex: Arc::new(Mutex::new(Vec::new())),
             accepting_server: None,
             server_event_tx,
@@ -703,6 +715,7 @@ impl<RegistrantId: Clone + Send + Sync + 'static> Server<RegistrantId> {
         // Begin accepting connections
         self.accepting_server = Some(listening_server.accept(
                 current_registration,
+                self.runtime_directory.clone(),
                 self.connections_mutex.clone(),
                 self.server_event_tx.clone()));
         Ok(())

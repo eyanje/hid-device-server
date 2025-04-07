@@ -1,4 +1,6 @@
 use bluer::Address;
+use std::env;
+use std::path::Path;
 use tokio::sync::{broadcast, mpsc};
 use tokio::signal::unix::{signal, SignalKind};
 
@@ -37,20 +39,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // TODO: rather than read fron stdin, receive signals in order to stop
     // (Or however systemd does it)
+    let runtime_directory_env = env::var_os("RUNTIME_DIRECTORY");
+    let runtime_directory = match &runtime_directory_env {
+        Some(dir) => Path::new(dir),
+        None => Path::new("."),
+    };
+    eprintln!("Running in {}", runtime_directory.display());
 
     // Listen for SIGINT (Ctrl-C) and SIGTERM.
     let mut int_signal = signal(SignalKind::interrupt())?;
     let mut term_signal = signal(SignalKind::terminate())?;
 
-    let event_listener = TempUnixSeqpacketListener::bind("event").unwrap();
+    let event_listener = TempUnixSeqpacketListener::bind(runtime_directory.join("event")).unwrap();
     let (server_event_tx, mut server_event_rx) = broadcast::channel(16);
     let event_server = EventServer::listen(event_listener, server_event_tx.clone());
 
     // Start the server, which holds remote connections.
-    let mut server = Server::new(Address::any(), server_event_tx.clone());
+    let mut server = Server::new(
+        Address::any(),
+        runtime_directory.to_path_buf(),
+        server_event_tx.clone());
 
     // Receive commands from applications
-    let command_listener = TempUnixSeqpacketListener::bind("command").unwrap();
+    let command_listener = TempUnixSeqpacketListener::bind(runtime_directory.join("command")).unwrap();
     let (command_tx, mut command_rx) = mpsc::channel(16);
     let command_server = CommandServer::listen(command_listener, command_tx);
 
