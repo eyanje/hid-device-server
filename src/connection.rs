@@ -482,16 +482,14 @@ async fn receive_interrupt_connection(
     }
 }
 
-
-#[derive(Debug)]
-struct BoundServer {
-    control_listener_socket: Socket<SeqPacket>,
-    interrupt_listener_socket: Socket<SeqPacket>,
+struct ListeningServer {
+    control_listener: SeqPacketListener,
+    interrupt_listener: SeqPacketListener,
 }
 
-impl BoundServer {
-    /// Construct a BoundServer by binding two unbound sockets.
-    pub fn bind(address: Address) -> io::Result<Self> {
+impl ListeningServer {
+    /// Construct a ListeningServer bound to the given address.
+    pub fn listen(address: Address) -> io::Result<Self> {
         let control_listener_socket = Socket::new_seq_packet()?;
         let interrupt_listener_socket = Socket::new_seq_packet()?;
         // Bind sockets to their respective addresses.
@@ -507,43 +505,11 @@ impl BoundServer {
             psm: psm::HID_INTERRUPT,
             cid: 0,
         })?;
-        // Construct self.
+
         Ok(Self {
-            control_listener_socket,
-            interrupt_listener_socket,
+            control_listener: control_listener_socket.listen(0)?,
+            interrupt_listener: interrupt_listener_socket.listen(0)?,
         })
-    }
-
-    /// Convert both sockets into listening sockets.
-    pub fn listen(self) -> io::Result<ListeningServer> {
-        Ok(ListeningServer::new(
-            self.control_listener_socket.listen(0)?,
-            self.interrupt_listener_socket.listen(0)?))
-    }
-}
-    
-
-struct ListeningServer {
-    control_listener: SeqPacketListener,
-    interrupt_listener: SeqPacketListener,
-}
-
-impl ListeningServer {
-    /// Trivially construct a ListeningServer from a control listener and an interrupt listener.
-    pub fn new(
-        control_listener: SeqPacketListener,
-        interrupt_listener: SeqPacketListener
-    ) -> Self {
-        Self {
-            control_listener,
-            interrupt_listener,
-        }
-    }
-
-    /// Construct a ListeningServer bound to the given address.
-    pub fn listen(address: Address) -> io::Result<Self> {
-        BoundServer::bind(address)?
-            .listen()
     }
 
 
