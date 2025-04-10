@@ -3,8 +3,8 @@ Description=Daemon to proxy Bluetooth HID connections to Unix sockets
 After=bluetooth.target
 
 [Service]
-RuntimeDirectory=hid-device-server
-ExecStart=/usr/bin/hid-device-server
+RuntimeDirectory=hid-server
+ExecStart=/usr/bin/hid-server
 Group=hiddev
 
 [Install]
