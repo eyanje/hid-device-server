@@ -8,9 +8,7 @@ mod command;
 mod connection;
 mod event;
 mod fs;
-mod info_file;
 mod pipe;
-mod registration;
 
 use command::CommandServer;
 use connection::Server;
@@ -78,14 +76,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                 };
                 // Consider moving this logic into main
-                let reply = command_server.handle_command(
+                command_server.handle_command(
                     &command,
                     &mut server).await;
-                // Return reply
-                if let Err(r) = command.reply(reply) {
-                    eprintln!("Error replying {:?} to command", r);
-                    continue;
-                }
             },
             // Listen for events
             server_event_res = server_event_rx.recv() => {

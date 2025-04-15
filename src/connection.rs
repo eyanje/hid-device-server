@@ -14,9 +14,7 @@ use tokio::task::{JoinError, JoinHandle};
 
 use crate::event::{ServerEvent};
 use crate::fs::{FileExt, TempDir, TempFile, TempUnixDatagram, TempUnixSeqpacketListener};
-use crate::info_file::create_info_files;
 use crate::pipe::{self, FromPipe, Pipe};
-use crate::registration::{Registration, RegistrationInfo};
 
 
 /*
@@ -230,9 +228,8 @@ impl Display for HandleConnectionError {
 
 /// Establish sockets and I/O loops for the control and interrupt sockets, as well as an event
 /// socket.
-fn handle_connection<RegistrantId, P: AsRef<Path>>(
+fn handle_connection<P: AsRef<Path>>(
     peer_address: Address,
-    current_registration_info: &RegistrationInfo<RegistrantId>,
     runtime_directory: P,
     control_socket: SeqPacket,
     interrupt_rx: mpsc::Receiver<SeqPacket>,
@@ -251,11 +248,6 @@ fn handle_connection<RegistrantId, P: AsRef<Path>>(
     };
     
     // Create informational files
-
-    // Static info files
-    let static_info_files = create_info_files(connection_dir_path.as_path(),
-                                              current_registration_info)
-        .map_err(|e| HandleConnectionError::CreatingInfoFile(e))?;
 
     let ready_path = connection_dir_path.join("ready");
     let ready_file = TempFile::new_with_data(ready_path, b"0")
@@ -341,9 +333,6 @@ fn handle_connection<RegistrantId, P: AsRef<Path>>(
             let _ = control_handler.await;
         }
 
-        // Drop info files, except for the ready file, which is owned by the interrupt handler.
-        drop(static_info_files);
-        
         // Drop directory.
         drop(connection_dir);
     });
@@ -402,8 +391,7 @@ async fn cancel_existing(connections_mutex: &Mutex<Vec<Connection>>, peer_addres
 }
 
 
-async fn receive_control_connection<RegistrantId: Sync, P: AsRef<Path>>(
-    current_registration_info: &RegistrationInfo<RegistrantId>,
+async fn receive_control_connection<P: AsRef<Path>>(
     connections_mutex: Arc<Mutex<Vec<Connection>>>,
     runtime_directory: P,
     control: SeqPacket,
@@ -421,7 +409,6 @@ async fn receive_control_connection<RegistrantId: Sync, P: AsRef<Path>>(
     // Create a new connection with the peer
     let connection_handle = match handle_connection(
         peer_address,
-        current_registration_info,
         runtime_directory,
         control,
         interrupt_rx,
@@ -514,15 +501,13 @@ impl ListeningServer {
 
 
     /// Begin accepting connections.
-    pub fn accept<RegistrantId: Clone + Send + Sync + 'static>(
+    pub fn accept(
         self,
-        current_registration: Registration<RegistrantId>,
         runtime_directory: PathBuf,
         connections: Arc<Mutex<Vec<Connection>>>,
         server_event_tx: broadcast::Sender<ServerEvent>,
-    ) -> AcceptingServer<RegistrantId> {
+    ) -> AcceptingServer {
         AcceptingServer::accept(
-            current_registration,
             runtime_directory,
             self.control_listener,
             self.interrupt_listener,
@@ -533,20 +518,14 @@ impl ListeningServer {
 
 /// A struct representing a running accept loop
 /// Can be dropped to stop both listening and accepting.
-struct AcceptingServer<RegistrantId: Clone + Send + Sync> {
-    current_registration: Registration<RegistrantId>,
+struct AcceptingServer {
     cancel_tx: mpsc::Sender<()>,
     accept_handle: JoinHandle<()>,
 }
 
-impl<RegistrantId: Clone + Send + Sync + 'static> AcceptingServer<RegistrantId> {
-    pub fn current_registrant(&self) -> &RegistrantId {
-        self.current_registration.info().registrant()
-    }
-
+impl AcceptingServer {
     /// Begin accepting connections.
     pub fn accept(
-        current_registration: Registration<RegistrantId>,
         runtime_directory: PathBuf,
         control_listener: SeqPacketListener,
         interrupt_listener: SeqPacketListener,
@@ -554,9 +533,7 @@ impl<RegistrantId: Clone + Send + Sync + 'static> AcceptingServer<RegistrantId> 
         server_event_tx: broadcast::Sender<ServerEvent>,
     ) -> Self {
         let (cancel_tx, mut cancel_rx) = mpsc::channel(1);
-        let current_registration_info_cloned = current_registration.info().clone();
         let accept_handle = tokio::spawn(async move {
-            let current_registration_info_moved = current_registration_info_cloned;
             loop {
                 tokio::select! {
                     control_result = control_listener.accept() => {
@@ -571,7 +548,6 @@ impl<RegistrantId: Clone + Send + Sync + 'static> AcceptingServer<RegistrantId> 
 
                         // Register the new control connection
                         receive_control_connection(
-                            &current_registration_info_moved,
                             connections_mutex.clone(),
                             &runtime_directory,
                             control,
@@ -611,7 +587,6 @@ impl<RegistrantId: Clone + Send + Sync + 'static> AcceptingServer<RegistrantId> 
         });
 
         Self {
-            current_registration,
             cancel_tx,
             accept_handle,
         }
@@ -630,7 +605,7 @@ impl<RegistrantId: Clone + Send + Sync + 'static> AcceptingServer<RegistrantId> 
     }
 }
 
-impl<RegistrantId: Clone + Send + Sync> Drop for AcceptingServer<RegistrantId> {
+impl Drop for AcceptingServer {
     /// Immediately aborts the currently running loop, potenetially while accepting a connection.
     fn drop(&mut self) {
         self.accept_handle.abort();
@@ -639,15 +614,15 @@ impl<RegistrantId: Clone + Send + Sync> Drop for AcceptingServer<RegistrantId> {
 
 
 /// Persistent server of connections
-pub struct Server<RegistrantId: Clone + Send + Sync> {
+pub struct Server {
     address: Address,
     runtime_directory: PathBuf,
     connections_mutex: Arc<Mutex<Vec<Connection>>>,
-    accepting_server: Option<AcceptingServer<RegistrantId>>,
+    accepting_server: Option<AcceptingServer>,
     server_event_tx: broadcast::Sender<ServerEvent>,
 }
 
-impl<RegistrantId: Clone + Send + Sync + 'static> Server<RegistrantId> {
+impl Server {
     pub fn new(address: Address,
                runtime_directory: PathBuf,
                server_event_tx: broadcast::Sender<ServerEvent>) -> Self {
@@ -663,7 +638,6 @@ impl<RegistrantId: Clone + Send + Sync + 'static> Server<RegistrantId> {
     /// Open the server to incoming connections, using the given registration.
     pub async fn up(
         &mut self,
-        current_registration: Registration<RegistrantId>,
     ) -> std::io::Result<()> {
         // If there is currently a running handle, do nothing.
         // Might not catch all cases, but should catch enough.
@@ -680,7 +654,6 @@ impl<RegistrantId: Clone + Send + Sync + 'static> Server<RegistrantId> {
 
         // Begin accepting connections
         self.accepting_server = Some(listening_server.accept(
-                current_registration,
                 self.runtime_directory.clone(),
                 self.connections_mutex.clone(),
                 self.server_event_tx.clone()));
@@ -705,10 +678,6 @@ impl<RegistrantId: Clone + Send + Sync + 'static> Server<RegistrantId> {
         for mut conn in self.connections_mutex.lock().unwrap().drain(..) {
             conn.cancel().await;
         }
-    }
-
-    pub fn current_registrant(&self) -> Option<&RegistrantId> {
-        self.accepting_server.as_ref().map(|s| s.current_registrant())
     }
 }
 

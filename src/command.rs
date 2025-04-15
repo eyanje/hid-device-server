@@ -6,7 +6,6 @@ use uds::tokio::{UnixSeqpacketConn};
 
 use crate::connection::Server;
 use crate::fs::TempUnixSeqpacketListener;
-use crate::registration::Registration;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ParseError {
@@ -51,13 +50,12 @@ impl CommandBody {
 }
 
 #[derive(Debug)]
-pub struct Command<Id> {
-    connection_id: Id,
+pub struct Command {
     body: CommandBody,
     reply_tx: oneshot::Sender<Reply>,
 }
 
-impl<Id> Command<Id> {
+impl Command {
     pub fn reply(self, reply: Reply) -> std::result::Result<(), Reply> {
         self.reply_tx.send(reply)
     }
@@ -97,10 +95,9 @@ impl Reply {
 // Could parse class
 
 /// Handle a command received from a connected client.
-async fn handle_client_command<Id>(
-    connection_id: Id,
+async fn handle_client_command(
     buf: &[u8],
-    command_tx: &mpsc::Sender<Command<Id>>,
+    command_tx: &mpsc::Sender<Command>,
 ) -> Reply {
     // Parse the command
     let command_body = match CommandBody::parse(buf) {
@@ -114,7 +111,6 @@ async fn handle_client_command<Id>(
     // Attach connection ID and a reply channel to command
     let (reply_tx, reply_rx) = oneshot::channel();
     let command = Command {
-        connection_id,
         body: command_body,
         reply_tx: reply_tx,
     };
@@ -136,10 +132,9 @@ async fn handle_client_command<Id>(
 }
 
 /// Handle a single client command connection.
-async fn handle_connection<Id: Copy + Display>(
-    connection_id: Id,
+async fn handle_connection(
     client: &mut UnixSeqpacketConn,
-    command_tx: &mpsc::Sender<Command<Id>>,
+    command_tx: &mpsc::Sender<Command>,
 ) {
     const BUF_SIZE: usize = 4096;
     let mut buf = [0u8; BUF_SIZE];
@@ -150,18 +145,17 @@ async fn handle_connection<Id: Copy + Display>(
                     Ok(len) => len,
                     Err(e) => {
                         // Exit.
-                        eprintln!("Error receiving from client {}: {}", &connection_id, e);
+                        eprintln!("Error receiving from client: {}", e);
                         break;
                     }
                 };
                 // Len == 0 indicates a disconnect.
                 if len == 0 {
-                    eprintln!("Disconnected from client {}", &connection_id);
+                    eprintln!("Disconnected from client");
                     break;
                 }
                 // Process connection
                 let reply = handle_client_command(
-                    connection_id,
                     &buf[..len],
                     command_tx).await;
                 // Serialize and send the reply to the client.
@@ -185,14 +179,12 @@ pub struct CommandServer {
     listener_handle: JoinHandle<()>,
 }
 
-type ConnectionId = u128;
-
 impl CommandServer {
 
     /// Listen on the given socket and send commands from clients through the given mpsc.
     pub fn listen(
         mut command_listener: TempUnixSeqpacketListener,
-        command_tx: mpsc::Sender<Command<ConnectionId>>,
+        command_tx: mpsc::Sender<Command>,
     ) -> Self {
         let client_handles = Arc::new(Mutex::new(Vec::new()));
 
@@ -220,14 +212,12 @@ impl CommandServer {
                 // Spawn a new task to handle a command connection
                 let new_connection = tokio::spawn(async move {
                     handle_connection(
-                        connection_id,
                         &mut connection,
                         &client_command_tx).await;
                     // Cleanup by deregistering
                     println!("Deregistering {}", connection_id);
                     let (reply_tx, reply_rx) = oneshot::channel();
                     let _ = client_command_tx.send(Command {
-                        connection_id,
                         body: CommandBody::Deregister,
                         reply_tx,
                     }).await;
@@ -246,58 +236,17 @@ impl CommandServer {
     }
 
     /// Handle a single command sent by a client-handler task.
-    pub async fn handle_command<Id: Copy + Display + Eq + Send + Sync + 'static>(
+    pub async fn handle_command(
         &self,
-        command: &Command<Id>,
-        server: &mut Server<Id>,
-    ) -> Reply {
+        command: &Command,
+        server: &mut Server,
+    ) {
         match &command.body {
             CommandBody::Register => {
-                let can_register = match server.current_registrant() {
-                    Some(r) => *r == command.connection_id,
-                    None => true,
-                };
-    
-                if can_register {
-                    // Replace the current SDP record with the given XML record.
-                    let new_registration = match Registration::register(
-                        command.connection_id
-                    ).await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            eprintln!("Failed to register profile from connection {}: {}",
-                                      command.connection_id, e);
-                            return Reply::Refused;
-                        },
-                    };
-                    // Turn on listening
-                    server.up(new_registration).await.unwrap();
-                    // Reply
-                    Reply::Ok
-                } else {
-                    // Reply
-                    println!("Refusing register from {}. Current registrant: {}",
-                             command.connection_id,
-                             server.current_registrant().unwrap());
-                    Reply::Refused
-                }
+                server.up().await.unwrap();
             },
             CommandBody::Deregister => {
-                let can_deregister = match server.current_registrant() {
-                    Some(r) => *r == command.connection_id,
-                    None => true,
-                };
-                if can_deregister {
-                    server.down().await.unwrap();
-    
-                    Reply::Ok
-                } else {
-                    // Reply
-                    println!("Refusing deregister from {}. Current registrant: {}",
-                             command.connection_id,
-                             server.current_registrant().unwrap());
-                    Reply::Refused
-                }
+                server.down().await.unwrap();
             },
         }
     }
