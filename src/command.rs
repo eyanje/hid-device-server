@@ -66,7 +66,6 @@ pub enum Reply {
     Ok,
     MalformedCommand,
     Disconnected,
-    Refused,
 }
 
 impl Reply {
@@ -75,7 +74,6 @@ impl Reply {
             Reply::Ok => &[0],
             Reply::MalformedCommand => &[1],
             Reply::Disconnected => &[2],
-            Reply::Refused => &[3],
         }
     }
 
@@ -84,7 +82,6 @@ impl Reply {
         match self {
             Reply::Ok => false,
             Reply::MalformedCommand => false,
-            Reply::Refused => false,
 
             Reply::Disconnected => true,
         }
@@ -112,7 +109,7 @@ async fn handle_client_command(
     let (reply_tx, reply_rx) = oneshot::channel();
     let command = Command {
         body: command_body,
-        reply_tx: reply_tx,
+        reply_tx,
     };
     // Send the command to the main loop
     if let Err(e) = command_tx.send(command).await {
@@ -240,13 +237,15 @@ impl CommandServer {
         &self,
         command: &Command,
         server: &mut Server,
-    ) {
+    ) -> Reply {
         match &command.body {
             CommandBody::Register => {
                 server.up().await.unwrap();
+                Reply::Ok
             },
             CommandBody::Deregister => {
                 server.down().await.unwrap();
+                Reply::Ok
             },
         }
     }
