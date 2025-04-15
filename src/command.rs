@@ -1,5 +1,4 @@
 use std::fmt::{Display, Formatter};
-use std::string::FromUtf8Error;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -13,7 +12,6 @@ use crate::registration::Registration;
 enum ParseError {
     UnexpectedEnd,
     UnrecognizedOpcode(u8),
-    NotUtf8(FromUtf8Error),
 }
 
 impl Display for ParseError {
@@ -25,9 +23,6 @@ impl Display for ParseError {
             Self::UnrecognizedOpcode(code) => {
                 format!("unrecognized ocpode {}", code).fmt(f)
             },
-            Self::NotUtf8(error) => {
-                error.fmt(f)
-            },
         }
     }
 }
@@ -35,9 +30,7 @@ impl std::error::Error for ParseError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CommandBody {
-    Register {
-        sdp_record: String,
-    },
+    Register,
     Deregister,
 }
 
@@ -48,18 +41,9 @@ impl CommandBody {
         }
 
         let opcode = buf[0];
-        let data = &buf[1..];
 
         match opcode {
-            1 => {
-                let sdp_record = match String::from_utf8(data.to_vec()) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        return Err(ParseError::NotUtf8(e));
-                    },
-                };
-                Ok(Self::Register { sdp_record: sdp_record })
-            },
+            1 => Ok(Self::Register),
             2 => Ok(Self::Deregister),
             _ => Err(ParseError::UnrecognizedOpcode(opcode)),
         }
@@ -268,7 +252,7 @@ impl CommandServer {
         server: &mut Server<Id>,
     ) -> Reply {
         match &command.body {
-            CommandBody::Register { sdp_record } => {
+            CommandBody::Register => {
                 let can_register = match server.current_registrant() {
                     Some(r) => *r == command.connection_id,
                     None => true,
@@ -277,7 +261,7 @@ impl CommandServer {
                 if can_register {
                     // Replace the current SDP record with the given XML record.
                     let new_registration = match Registration::register(
-                        command.connection_id, sdp_record.clone()
+                        command.connection_id
                     ).await {
                         Ok(r) => r,
                         Err(e) => {
